@@ -1,0 +1,127 @@
+name: Fork Publish Controller Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Git ref to build, such as codex/pvc-retention-policy"
+        required: true
+        default: "codex/pvc-retention-policy"
+        type: string
+      image_tag:
+        description: "Image tag to publish"
+        required: true
+        default: "pr-1001-e2fdece"
+        type: string
+      publish_ghcr:
+        description: "Publish to ghcr.io/<owner>/agent-sandbox-controller"
+        required: true
+        default: true
+        type: boolean
+      publish_harbor:
+        description: "Publish to Harbor using HARBOR_* repository secrets"
+        required: true
+        default: false
+        type: boolean
+      harbor_image:
+        description: "Harbor image without tag"
+        required: false
+        default: "harbor.tegical.com/registry.k8s.io/agent-sandbox/agent-sandbox-controller"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-controller:
+    name: Publish Controller Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Set build metadata
+        id: metadata
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(git describe --always --dirty)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Login to GHCR
+        if: ${{ inputs.publish_ghcr }}
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Harbor
+        if: ${{ inputs.publish_harbor }}
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build and push controller image
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PUBLISH_GHCR: ${{ inputs.publish_ghcr }}
+          PUBLISH_HARBOR: ${{ inputs.publish_harbor }}
+          HARBOR_IMAGE: ${{ inputs.harbor_image }}
+          GIT_VERSION: ${{ steps.metadata.outputs.version }}
+          GIT_SHA: ${{ steps.metadata.outputs.sha }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+        run: |
+          set -euo pipefail
+
+          tags=()
+          if [[ "${PUBLISH_GHCR}" == "true" ]]; then
+            owner="${GITHUB_REPOSITORY_OWNER,,}"
+            tags+=("-t" "ghcr.io/${owner}/agent-sandbox-controller:${IMAGE_TAG}")
+          fi
+          if [[ "${PUBLISH_HARBOR}" == "true" ]]; then
+            tags+=("-t" "${HARBOR_IMAGE}:${IMAGE_TAG}")
+          fi
+          if [[ "${#tags[@]}" -eq 0 ]]; then
+            echo "At least one registry target must be enabled." >&2
+            exit 1
+          fi
+
+          docker buildx build \
+            --progress=plain \
+            --platform=linux/amd64,linux/arm64 \
+            --push \
+            "${tags[@]}" \
+            --build-arg="GIT_VERSION=${GIT_VERSION}" \
+            --build-arg="GIT_SHA=${GIT_SHA}" \
+            --build-arg="BUILD_DATE=${BUILD_DATE}" \
+            -f Dockerfile .
+
+      - name: Print published image references
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PUBLISH_GHCR: ${{ inputs.publish_ghcr }}
+          PUBLISH_HARBOR: ${{ inputs.publish_harbor }}
+          HARBOR_IMAGE: ${{ inputs.harbor_image }}
+        run: |
+          if [[ "${PUBLISH_GHCR}" == "true" ]]; then
+            owner="${GITHUB_REPOSITORY_OWNER,,}"
+            echo "GHCR: ghcr.io/${owner}/agent-sandbox-controller:${IMAGE_TAG}"
+          fi
+          if [[ "${PUBLISH_HARBOR}" == "true" ]]; then
+            echo "Harbor: ${HARBOR_IMAGE}:${IMAGE_TAG}"
+          fi
