@@ -18,16 +18,6 @@ on:
         required: true
         default: true
         type: boolean
-      publish_harbor:
-        description: "Publish to Harbor using HARBOR_* repository secrets"
-        required: true
-        default: false
-        type: boolean
-      harbor_image:
-        description: "Harbor image without tag"
-        required: false
-        default: "harbor.tegical.com/registry.k8s.io/agent-sandbox/agent-sandbox-controller"
-        type: string
 
 permissions:
   contents: read
@@ -66,21 +56,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Harbor
-        if: ${{ inputs.publish_harbor }}
-        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
-        with:
-          registry: ${{ secrets.HARBOR_REGISTRY }}
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
-
       - name: Build and push controller image
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           PUBLISH_GHCR: ${{ inputs.publish_ghcr }}
-          PUBLISH_HARBOR: ${{ inputs.publish_harbor }}
-          HARBOR_IMAGE: ${{ inputs.harbor_image }}
           GIT_VERSION: ${{ steps.metadata.outputs.version }}
           GIT_SHA: ${{ steps.metadata.outputs.sha }}
           BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
@@ -92,11 +72,8 @@ jobs:
             owner="${GITHUB_REPOSITORY_OWNER,,}"
             tags+=("-t" "ghcr.io/${owner}/agent-sandbox-controller:${IMAGE_TAG}")
           fi
-          if [[ "${PUBLISH_HARBOR}" == "true" ]]; then
-            tags+=("-t" "${HARBOR_IMAGE}:${IMAGE_TAG}")
-          fi
           if [[ "${#tags[@]}" -eq 0 ]]; then
-            echo "At least one registry target must be enabled." >&2
+            echo "GHCR publishing must be enabled." >&2
             exit 1
           fi
 
@@ -115,13 +92,8 @@ jobs:
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
           PUBLISH_GHCR: ${{ inputs.publish_ghcr }}
-          PUBLISH_HARBOR: ${{ inputs.publish_harbor }}
-          HARBOR_IMAGE: ${{ inputs.harbor_image }}
         run: |
           if [[ "${PUBLISH_GHCR}" == "true" ]]; then
             owner="${GITHUB_REPOSITORY_OWNER,,}"
             echo "GHCR: ghcr.io/${owner}/agent-sandbox-controller:${IMAGE_TAG}"
-          fi
-          if [[ "${PUBLISH_HARBOR}" == "true" ]]; then
-            echo "Harbor: ${HARBOR_IMAGE}:${IMAGE_TAG}"
           fi
