@@ -29,7 +29,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -42,13 +41,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
+	// value on Pods, so per-reconcile pod lookups are O(1).
+	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )
@@ -117,6 +120,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
+	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
 	utilruntime.Must(sandboxv1beta1.AddToScheme(Scheme))
 }
 
@@ -136,6 +140,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;update;patch,resourceNames=sandboxes.agents.x-k8s.io;sandboxclaims.extensions.agents.x-k8s.io;sandboxtemplates.extensions.agents.x-k8s.io;sandboxwarmpools.extensions.agents.x-k8s.io
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -162,6 +167,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	initialAttrs := map[string]string{
 		"sandbox.name":      sandbox.Name,
 		"sandbox.namespace": sandbox.Namespace,
+	}
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+		initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
 	}
 	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()
@@ -241,7 +249,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
-		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
 		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 		sandbox.Status.NodeName = pod.Spec.NodeName
 	}
@@ -331,6 +339,19 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = "Sandbox is suspended"
 		}
 		return readyCondition
+	}
+
+	if pod != nil {
+		switch pod.Status.Phase {
+		case corev1.PodSucceeded:
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodSucceeded
+			readyCondition.Message = "Pod completed successfully"
+			return readyCondition
+		case corev1.PodFailed:
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodFailed
+			readyCondition.Message = "Pod failed"
+			return readyCondition
+		}
 	}
 
 	message := ""
@@ -451,7 +472,18 @@ func GetNumericHash(input string) uint32 {
 // NameHash generates an FNV-1a hash from a string and returns
 // it as a fixed-length hexadecimal string.
 func NameHash(objectName string) string {
-	return fmt.Sprintf("%08x", GetNumericHash(objectName))
+	h := GetNumericHash(objectName)
+	const hex = "0123456789abcdef"
+	var buf [8]byte
+	buf[0] = hex[(h>>28)&0xf]
+	buf[1] = hex[(h>>24)&0xf]
+	buf[2] = hex[(h>>20)&0xf]
+	buf[3] = hex[(h>>16)&0xf]
+	buf[4] = hex[(h>>12)&0xf]
+	buf[5] = hex[(h>>8)&0xf]
+	buf[6] = hex[(h>>4)&0xf]
+	buf[7] = hex[h&0xf]
+	return string(buf[:])
 }
 
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
@@ -467,6 +499,45 @@ func hasSystemReservedPrefix(key string) bool {
 // label) and hijack another Sandbox's network traffic.
 func isSystemLabel(key string) bool {
 	return hasSystemReservedPrefix(key)
+}
+
+// extensionPodLabelKeys must stay in sync with computeExtensionPodLabels so reconcile
+// removes stale extension labels when they are no longer expected on the Pod.
+var extensionPodLabelKeys = []string{
+	sandboxv1beta1.SandboxWarmPoolLabel,
+	sandboxv1beta1.SandboxTemplateRefHashLabel,
+}
+
+// computeExtensionPodLabels returns extension-owned labels that should be propagated
+// from a Sandbox CR to its Pod. Labels are only returned when the Sandbox is owned
+// by an extensions controller (SandboxClaim or SandboxWarmPool).
+func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]string {
+	ref := metav1.GetControllerOf(sandbox)
+	if ref == nil {
+		return nil
+	}
+	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+	if gvk.Group != extensionsv1beta1.GroupVersion.Group {
+		return nil
+	}
+
+	var labels map[string]string
+
+	if gvk.Kind == "SandboxWarmPool" {
+		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
+			if labels == nil {
+				labels = make(map[string]string, 2)
+			}
+			labels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+		}
+	}
+	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok && val != "" {
+		if labels == nil {
+			labels = make(map[string]string, 2)
+		}
+		labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
+	}
+	return labels
 }
 
 // isSystemAnnotation reports whether an annotation key is reserved for the sandbox
@@ -668,18 +739,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
 	defer end()
 
-	// List all pods with the pool label matching the warm pool name hash
+	// List all pods carrying this sandbox's tracking label (sandboxLabel),
+	// via the cache field index registered in SetupWithManager.
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxLabel: nameHash,
-	})
-
-	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     sandbox.Namespace,
-	}); err != nil {
+	if err := r.List(ctx, podList,
+		client.InNamespace(sandbox.Namespace),
+		client.MatchingFields{podSandboxNameHashIndex: nameHash},
+	); err != nil {
 		logger.Error(err, "Failed to list pods")
+		return nil, fmt.Errorf("pod list failed: %w", err)
 	}
 
 	if len(podList.Items) > 1 {
@@ -824,7 +893,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, err
 		}
 
-		// TODO - Do we enfore (change) spec if a pod exists ?
+		// TODO - Do we enforce (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
 	}
@@ -851,16 +920,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// Assign system-owned labels after merging user input so they cannot be overridden.
 	podLabels[sandboxLabel] = nameHash
 
-	// Propagate the warm pool label directly from the Sandbox CR labels to the Pod,
-	// provided the Sandbox is actually owned by a Warm Pool.
-	// The warm pool label is required by the capacity buffer to identify the warm pool pods.
-	if ref := metav1.GetControllerOf(sandbox); ref != nil {
-		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
-			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
-				podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
-			}
-		}
+	// Propagate extension-owned labels from the Sandbox CR to the Pod, provided the Sandbox is
+	// owned by an extensions controller (SandboxClaim or SandboxWarmPool).
+	maps.Copy(podLabels, computeExtensionPodLabels(sandbox))
+
+	// Propagate the created-by label from the Sandbox CR labels to the Pod if present,
+	// normalizing it to a known allow-list to prevent invalid values or high cardinality.
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok && val != "" {
+		podLabels[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
 	}
 
 	annotations := map[string]string{}
@@ -991,23 +1058,34 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 			}
 		}
 	}
-	// Ensure the warm pool label is present if the sandbox is owned by a SandboxWarmPool.
-	var expectedWarmPoolHash string
-	if ref := metav1.GetControllerOf(sandbox); ref != nil {
-		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
-			expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+	// Reconcile extension-owned labels based on Sandbox ownership.
+	extensionLabels := computeExtensionPodLabels(sandbox)
+	for _, key := range extensionPodLabelKeys {
+		if val, ok := extensionLabels[key]; ok {
+			if pod.Labels[key] != val {
+				pod.Labels[key] = val
+				updated = true
+			}
+		} else if _, exists := pod.Labels[key]; exists {
+			delete(pod.Labels, key)
+			updated = true
 		}
 	}
-	if expectedWarmPoolHash != "" {
-		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {
-			pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = expectedWarmPoolHash
+
+	// Ensure the created-by label is present on the Pod if it is present on the Sandbox.
+	// We normalize it to a known allow-list to prevent invalid values or high cardinality on the Pod.
+	var expectedCreatedBy string
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok && val != "" {
+		expectedCreatedBy = asmetrics.NormalizeCreatedBy(val)
+	}
+	if expectedCreatedBy != "" {
+		if pod.Labels[sandboxv1beta1.CreatedByLabel] != expectedCreatedBy {
+			pod.Labels[sandboxv1beta1.CreatedByLabel] = expectedCreatedBy
 			updated = true
 		}
 	} else {
-		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
+		if _, exists := pod.Labels[sandboxv1beta1.CreatedByLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.CreatedByLabel)
 			updated = true
 		}
 	}
@@ -1124,7 +1202,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get PVC")
-			return fmt.Errorf("PVC Get Failed: %w", err)
+			return fmt.Errorf("failed to get PVC: %w", err)
 		}
 
 		pvcLabels := maps.Clone(pvcTemplate.Labels)
@@ -1270,8 +1348,23 @@ func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
 }
 
+// podSandboxNameHashIndexer extracts the sandboxLabel value for the
+// podSandboxNameHashIndex cache field index. Shared with tests so fake
+// clients register the same index the manager does.
+func podSandboxNameHashIndexer(obj client.Object) []string {
+	if v, ok := obj.GetLabels()[sandboxLabel]; ok {
+		return []string{v}
+	}
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podSandboxNameHashIndex,
+		podSandboxNameHashIndexer); err != nil {
+		return fmt.Errorf("failed to index pods by sandbox label: %w", err)
+	}
+
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{

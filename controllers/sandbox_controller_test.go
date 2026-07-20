@@ -17,6 +17,8 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -44,6 +46,7 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 	return fake.NewClientBuilder().
 		WithScheme(Scheme).
 		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
 		Build()
 }
@@ -201,7 +204,7 @@ func TestComputeConditions(t *testing.T) {
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 			expectedConditions: []metav1.Condition{
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Failed; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 			},
 		},
 		{
@@ -211,7 +214,7 @@ func TestComputeConditions(t *testing.T) {
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			expectedConditions: []metav1.Condition{
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Succeeded; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 			},
 		},
 		{
@@ -302,16 +305,15 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "minimal sandbox spec creates Pod but not Service by default",
 			// Input sandbox spec
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
+			}},
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
@@ -351,8 +353,7 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "minimal sandbox spec with Pod and Service",
 			// Input sandbox spec
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -361,7 +362,7 @@ func TestReconcile(t *testing.T) {
 							},
 						},
 					},
-				},
+				}},
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
@@ -421,8 +422,7 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "sandbox spec with PVC, Pod, and Service",
 			// Input sandbox spec
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -456,7 +456,7 @@ func TestReconcile(t *testing.T) {
 							},
 						},
 					},
-				},
+				}},
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
@@ -577,13 +577,12 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
 					},
-				},
+				}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
@@ -645,13 +644,12 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
 					},
-				},
+				}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
@@ -713,12 +711,11 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
+			}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
@@ -754,20 +751,18 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -807,20 +802,18 @@ func TestReconcile(t *testing.T) {
 			sandboxAnnotations: map[string]string{
 				sandboxv1beta1.SandboxPodNameAnnotation: "warmpool-abc-xyz",
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -857,20 +850,18 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyDelete),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyDelete),
+			},
 			},
 			wantDeletedObjs: []client.Object{
 				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
@@ -907,16 +898,14 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -956,16 +945,14 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -987,16 +974,14 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "sandbox expired with no matching pod or service",
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -1094,25 +1079,23 @@ func TestReconcilePod(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name: "test-container",
-						},
-					},
-				},
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels: map[string]string{
-						"custom-label": "label-val",
-					},
-					Annotations: map[string]string{
-						"custom-annotation": "anno-val",
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "test-container",
 					},
 				},
 			},
+			ObjectMeta: sandboxv1beta1.PodMetadata{
+				Labels: map[string]string{
+					"custom-label": "label-val",
+				},
+				Annotations: map[string]string{
+					"custom-annotation": "anno-val",
+				},
+			},
+		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 	testCases := []struct {
@@ -1314,27 +1297,25 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							// Attacker attempts to hijack another Sandbox's routing label
+							// and to spoof an extensions-prefixed system label.
+							"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
+							"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
+							"custom-label": "label-val",
 						},
-						ObjectMeta: sandboxv1beta1.PodMetadata{
-							Labels: map[string]string{
-								// Attacker attempts to hijack another Sandbox's routing label
-								// and to spoof an extensions-prefixed system label.
-								"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
-								"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
-								"custom-label": "label-val",
-							},
-							Annotations: map[string]string{
-								"agents.x-k8s.io/pod-name":       "malicious-pod-name",
-								asmetrics.TraceContextAnnotation: "spoofed-trace",
-								"custom-annotation":              "anno-val",
-							},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/pod-name":       "malicious-pod-name",
+							asmetrics.TraceContextAnnotation: "spoofed-trace",
+							"custom-annotation":              "anno-val",
 						},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1427,12 +1408,10 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxWarmPoolLabel: "pool-hash",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1461,17 +1440,50 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{
-							Labels: map[string]string{
-								"custom-label":                      "label-val",
-								sandboxv1beta1.SandboxWarmPoolLabel: "pool-hash",
-							},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							"custom-label":                      "label-val",
+							sandboxv1beta1.SandboxWarmPoolLabel: "pool-hash",
 						},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "does not propagate template-ref-hash from Sandbox metadata to Pod",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1512,12 +1524,10 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1568,12 +1578,10 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1639,12 +1647,10 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1657,6 +1663,283 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxWarmPoolLabel:  NameHash("my-warm-pool"),
 						"custom-label":                       "label-val",
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "propagates template-ref-hash label from Sandbox labels to new Pod",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+							Kind:       "SandboxClaim",
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":        nameHash,
+						"custom-label":                             "label-val",
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "adds template-ref-hash label to existing Pod during reconciliation",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							"custom-label":                      "label-val",
+						},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/propagated-labels": "custom-label",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+							Kind:       "SandboxClaim",
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":        nameHash,
+						"custom-label":                             "label-val",
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "both warm-pool-sandbox and template-ref-hash coexist on Pod",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						sandboxv1beta1.SandboxWarmPoolLabel:        NameHash("my-warm-pool"),
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+							Kind:       "SandboxWarmPool",
+							Name:       "my-warm-pool",
+							UID:        "pool-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":        nameHash,
+						"custom-label":                             "label-val",
+						sandboxv1beta1.SandboxWarmPoolLabel:        NameHash("my-warm-pool"),
+						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "removes template-ref-hash label from Pod when Sandbox is not owned by extensions controller",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash":        nameHash,
+							"custom-label":                             "label-val",
+							sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+						},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/propagated-labels": "custom-label",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "removes template-ref-hash label from Pod when absent from Sandbox labels but still extensions-owned",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash":        nameHash,
+							"custom-label":                             "label-val",
+							sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+						},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/propagated-labels": "custom-label",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+							Kind:       "SandboxClaim",
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
 						"agents.x-k8s.io/propagated-labels": "custom-label",
@@ -1738,17 +2021,15 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: "test-container",
-								},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
 							},
 						},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1944,13 +2225,11 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: "foreign-pod",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
-						},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod:                nil,
@@ -2020,21 +2299,19 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						ObjectMeta: sandboxv1beta1.PodMetadata{
-							Labels: map[string]string{
-								"keep-label": "value",
-							},
-							Annotations: map[string]string{
-								"keep-annotation": "value",
-							},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							"keep-label": "value",
 						},
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
+						Annotations: map[string]string{
+							"keep-annotation": "value",
 						},
 					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -2086,18 +2363,195 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
-						},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod:                nil,
 			expectErr:              true,
 			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name"},
+		},
+		{
+			name:        "propagates and normalizes created-by label value go-client",
+			initialObjs: []runtime.Object{},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "go-client",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						sandboxv1beta1.CreatedByLabel:       "go-client",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name:        "normalizes invalid created-by label to unknown",
+			initialObjs: []runtime.Object{},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "invalid-user-value-which-is-too-long-or-custom",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						sandboxv1beta1.CreatedByLabel:       "unknown",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "updates and normalizes created-by label on existing Pod",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							"custom-label":                       "label-val",
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+							sandboxv1beta1.CreatedByLabel:        "controller",
+						},
+						Annotations: map[string]string{
+							"custom-annotation":                      "anno-val",
+							"agents.x-k8s.io/propagated-labels":      "custom-label",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "python-client",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						"custom-label":                       "label-val",
+						sandboxv1beta1.SandboxAdoptableLabel: "true",
+						sandboxv1beta1.CreatedByLabel:        "python-client",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "removes created-by label from existing Pod when Sandbox lacks it",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							"custom-label":                       "label-val",
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+							sandboxv1beta1.CreatedByLabel:        "go-client",
+						},
+						Annotations: map[string]string{
+							"custom-annotation":                      "anno-val",
+							"agents.x-k8s.io/propagated-labels":      "custom-label",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						"custom-label":                       "label-val",
+						sandboxv1beta1.SandboxAdoptableLabel: "true",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
 		},
 	}
 
@@ -2179,10 +2633,7 @@ func TestReconcileService(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			Service:       new(true),
-		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true)}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning},
 	}
 
 	testCases := []struct {
@@ -2545,9 +2996,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					Service: new(false),
-				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(false)}},
 			},
 			wantNilService:        true,
 			wantServiceDeleted:    true,
@@ -2571,9 +3020,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					Service: new(false),
-				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(false)}},
 			},
 			wantNilService:        true,
 			wantStatusService:     "",
@@ -2784,20 +3231,19 @@ func TestReconcilePVCs(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
-				{
-					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: pvcTemplateName},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
-							},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+			{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: pvcTemplateName},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
 						},
 					},
 				},
 			},
+		}},
 		},
 	}
 
@@ -3033,17 +3479,15 @@ func TestSandboxShutdownExpiryUsesTwoPassAndPreservesFinishedCondition(t *testin
 					UID:        sandboxUID,
 					Generation: 1,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					Service: new(true),
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
 						},
-					},
-					Lifecycle: sandboxv1beta1.Lifecycle{
-						ShutdownTime:   &shutdownTime,
-						ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-					},
+					}}, Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownTime:   &shutdownTime,
+					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+				},
 				},
 			}
 
@@ -3229,13 +3673,11 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 			UID:        sandboxUID,
 			Generation: 1,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "c", Image: "img"}},
-				},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img"}},
 			},
+		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 
@@ -3290,4 +3732,130 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+type mockTracer struct {
+	asmetrics.Instrumenter
+	capturedAttrs map[string]string
+}
+
+func (m *mockTracer) StartSpan(ctx context.Context, _ metav1.Object, _ string, attrs map[string]string) (context.Context, func()) {
+	if len(attrs) > 0 {
+		m.capturedAttrs = attrs
+	}
+	return ctx, func() {}
+}
+
+func (m *mockTracer) GetTraceContext(_ context.Context) string {
+	return ""
+}
+
+func (m *mockTracer) IsRecording(_ context.Context) bool {
+	return true
+}
+
+func (m *mockTracer) AddEvent(_ context.Context, _ string, _ map[string]string) {}
+
+func TestReconcile_TracingNormalization(t *testing.T) {
+	sbName := "tracing-test-sandbox"
+	sbNs := "default"
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbName,
+			Namespace: sbNs,
+			UID:       "uid-1",
+			Labels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "invalid-value",
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fc := newFakeClient(sandbox)
+	mt := &mockTracer{}
+	r := &SandboxReconciler{
+		Client:        fc,
+		Scheme:        Scheme,
+		Tracer:        mt,
+		ClusterDomain: "cluster.local",
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sbName, Namespace: sbNs}}
+
+	var sb sandboxv1beta1.Sandbox
+	require.NoError(t, fc.Get(ctx, req.NamespacedName, &sb))
+
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	require.NotNil(t, mt.capturedAttrs)
+	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
+}
+
+func TestNameHash_Correctness(t *testing.T) {
+	// Verify the fast hex encoding produces the same output as the
+	// reference implementation (fmt.Sprintf("%08x", ...)).
+	cases := []string{
+		"",
+		"a",
+		"my-sandbox",
+		"test-template-custom",
+		"pool",
+		"sandbox-name-with-a-very-long-label-value",
+	}
+
+	// Supplement with 100 randomized DNS-label-shaped strings so bit
+	// manipulation is exercised across a broader input distribution.
+	// Seeded for reproducibility.
+	rng := rand.New(rand.NewPCG(42, 0))
+	const dnsLabelChars = "abcdefghijklmnopqrstuvwxyz0123456789-"
+	for range 100 {
+		n := rng.IntN(63) + 1 // length in [1, 63]
+		var buf [63]byte
+		for i := range n {
+			buf[i] = dnsLabelChars[rng.IntN(len(dnsLabelChars))]
+		}
+		cases = append(cases, string(buf[:n]))
+	}
+
+	for _, name := range cases {
+		got := NameHash(name)
+		if len(got) != 8 {
+			t.Errorf("NameHash(%q) length = %d, want 8", name, len(got))
+		}
+		// Verify all chars are lowercase hex digits.
+		for i, c := range got {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				t.Errorf("NameHash(%q)[%d] = %c, want hex digit", name, i, c)
+			}
+		}
+		// Cross-check against GetNumericHash.
+		want := fmt.Sprintf("%08x", GetNumericHash(name))
+		if got != want {
+			t.Errorf("NameHash(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func BenchmarkNameHashNew(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = NameHash("my-sandbox-name")
+	}
+}
+
+func BenchmarkNameHashOld(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = fmt.Sprintf("%08x", GetNumericHash("my-sandbox-name"))
+	}
 }

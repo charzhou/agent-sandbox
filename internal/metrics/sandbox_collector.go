@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +42,7 @@ type AgentSandboxesMetricKey struct {
 	LaunchType     string
 	Template       string
 	OwnedBy        string
+	CreatedBy      string
 }
 
 // NewAgentSandboxesConstMetric creates a new Prometheus ConstMetric for the agent_sandboxes gauge.
@@ -55,6 +57,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.LaunchType,
 		key.Template,
 		key.OwnedBy,
+		key.CreatedBy,
 	)
 }
 
@@ -132,10 +135,13 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			sandboxTemplateStr = template
 		}
 
-		apiVersion := extensionsv1beta1.GroupVersion.String()
 		ownedByStr := "None"
 		if controllerRef := metav1.GetControllerOf(&sandbox); controllerRef != nil {
-			if controllerRef.APIVersion == apiVersion {
+			// Owner references keep the apiVersion that was current when they
+			// were written; sandboxes created before the v1beta1 upgrade still
+			// carry the v1alpha1 group version. Match on group, not version.
+			refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+			if err == nil && refGV.Group == extensionsv1beta1.GroupVersion.Group {
 				switch controllerRef.Kind {
 				case "SandboxClaim":
 					ownedByStr = "SandboxClaim"
@@ -145,6 +151,11 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 
+		createdByStr := "unknown"
+		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+			createdByStr = NormalizeCreatedBy(val)
+		}
+
 		key := AgentSandboxesMetricKey{
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
@@ -152,6 +163,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			LaunchType:     launchTypeStr,
 			Template:       sandboxTemplateStr,
 			OwnedBy:        ownedByStr,
+			CreatedBy:      createdByStr,
 		}
 		counts[key]++
 	}

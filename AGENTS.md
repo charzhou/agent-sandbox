@@ -14,6 +14,7 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 
 | Path | What lives there |
 | --- | --- |
+| [**.agents/skills/**](.agents/skills/) | Specialized instructions for you (AI agents). See "Agent Skills" section below. |
 | [api/v1beta1/](api/v1beta1/) | Core `Sandbox` types and kubebuilder markers. |
 | [extensions/api/v1beta1/](extensions/api/v1beta1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
 | [controllers/](controllers/) | Core `Sandbox` reconciler + tests. |
@@ -33,11 +34,15 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 
 When in doubt about ownership, check the nearest `OWNERS` file.
 
+## Agent Skills
+
+This repository provides specialized instructions for AI agents in the standard [`.agents/skills/`](.agents/skills/) directory, following the Agent Skills specification.
+
 ## Build, test, lint
 
 All standard tasks go through the [Makefile](Makefile). Prefer `make` targets over invoking tools directly so CI and local runs stay consistent.
 
-- `make all` — runs `fix-go-generate`, `build`, `lint-go`, `lint-api`, `test-unit`, `toc-verify`. Run this before sending a PR.
+- `make all` — runs `fix-go-generate`, `fix-api-docs`, `build`, `lint-go`, `lint-api`, `test-unit`, `toc-verify`. Run this before sending a PR.
 - `make build` — compiles `bin/manager` from `cmd/agent-sandbox-controller`.
 - `make test-unit` — runs Go unit tests with `-race` enabled and the Python unit test suites via `dev/tools/test-unit`.
 - `make test-e2e` / `make test-e2e-race` — e2e suite against a kind cluster (much slower; e2e is not raced by default).
@@ -69,9 +74,12 @@ If you change one of these, preview the rendered output (`hugo server` from [sit
 - Prefer extending existing files over adding new ones. Do not create new top-level directories without discussion.
 - Errors: wrap with context (`fmt.Errorf("...: %w", err)`); surface meaningful conditions on the resource status rather than swallowing.
 - Concurrency: respect `context.Context` cancellation; avoid goroutines without lifetime ownership; protect shared state.
-- Logging: use `logr.Logger` from controller-runtime (`log.FromContext(ctx)`); use structured key/value pairs, not `fmt.Sprintf`.
+- Logging: use `logr.Logger` from controller-runtime (`log.FromContext(ctx)`) with structured key/value pairs (never `fmt.Sprintf`). In Reconcile loops, reserve `logger.Info` / `V(0)` for major state changes (e.g., resource created, claim adopted) and require `V(4)` for routine steady-state checks or cache lookups.
+- Metrics cardinality & normalization: never introduce high or unbounded cardinality labels (e.g., pod names, UIDs, timestamps, raw errors). When deriving label values from dynamic input or errors, apply metrics normalization (an allowlist switch or categorizer) to map strings into a small, fixed enum.
+- Helper impact & DRY: factor repeated setup or error handling into helpers. When modifying helper predicates or error returns, audit all call sites across reconcilers to prevent downstream side effects (e.g., unexpected cache drops or queue evictions).
 - API changes are versioned (`v1beta1`). Treat any user-visible field, label, or annotation rename as a breaking change — discuss in an issue or KEP first [docs/keps/](docs/keps/).
 - Match existing kubebuilder marker style; required vs optional, default values, and validation belong on the type, not in the controller.
+- When modifying CRDs, APIs, or controller logic that interacts with APIs, adhere to the guidelines in [.agents/skills/k8s-api-conventions/SKILL.md](.agents/skills/k8s-api-conventions/SKILL.md).
 
 ## Python SDK conventions
 
